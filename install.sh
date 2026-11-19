@@ -1,100 +1,74 @@
 #!/bin/zsh
-# install.sh western [xbox|playstation]
-#                      A (Cross) bottom / B (Circle) right everywhere, X/Y at Nintendo positions, with icons to match
-#                      (X/Y symbols, HUD action diamond, ocarina notes).
-#                      - An app with the launcher's Buttons setting (the prebuilt app): set Buttons = Xbox or
-#                        PlayStation; both of its icon packs are fixed, the style argument is not needed.
-#                      - An app without it (upstream nxnative, which maps buttons by position like Nintendo): the hook
-#                        swaps A/B, and the chosen style's icons (default playstation) go into a RomFS overlay folder
-#                        in the game's Application Support folder, named in its env.txt (DM_ROMFS_OVERLAY).
-# install.sh menu      Buttons = Switch (or an app without the setting): menus confirm bottom / cancel right, gameplay
-#                      keeps Nintendo positions
-# install.sh --uninstall   everything back as packed
-# Quit the game first. Needs the tools venv (zstandard, fontTools, Pillow, numpy) for the icons, and macOS sips.
+# install.sh western <737848 Western zip or folder>
+#     A (Cross) bottom / B (Circle) right everywhere, X / Y (Triangle / Square) at their Nintendo positions, with the
+#     "Western" icons of "DualSense & Xbox Button Prompts" by Makine Çeviri (gamebanana.com/mods/737848): download
+#     its DualSense or Xbox "Western" file and give the zip (or the folder you unpacked it to).
+# install.sh menu
+#     Switch icons; menus confirm with the bottom button / cancel with the right one, gameplay keeps Nintendo positions.
+# install.sh --uninstall
+#     The game module back byte for byte (SHA-256 checked), no icon overlay.
+# Quit the game first. Needs Xcode's command line tools (clang, otool). The app is the upstream nxnative one: buttons by
+# position, as on a Switch (an app with a Buttons setting: keep it at Switch).
 set -e
 APP=${APP:-"/Applications/The Legend of Zelda - Ocarina of Time.app"}
 HERE=${0:A:h}
-PY=${PY:-$([[ -x $HERE/.venv/bin/python ]] && echo $HERE/.venv/bin/python || echo python3)}   # zstandard, fontTools, Pillow, numpy
-export OOT_ROMFS="$APP/Contents/Resources/romfs.img"
 BIN="$APP/Contents/Resources/dm/main.patched.bin"
 SUP="$HOME/Library/Application Support/nxnative/0400486024DEC000"
-STYLES=(xbox playstation)
-FILES=(Font2/Scalable/External.Nin_Ounce_NVN2.bfotf.zs UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.blarc.zs
-       UI/Layout2Archive/Common.Product.100.Nin_Ounce_NVN2.bntx.zs)
-RSIZE=System/Resource/ResourceSizeTable.Product.111.Nin_Ounce_NVN2.rsizetable.zs
+OVL="$SUP/mods/oot-western-buttons"
+usage() { echo "usage: install.sh western <737848 Western zip or folder> | menu | --uninstall"; exit 1; }
+[[ -f "$BIN" ]] || { echo "No game module at $BIN (set APP=<the app>)."; exit 1; }
 pgrep -f "$APP/Contents/MacOS/dmhost" >/dev/null && { echo "Quit the game first."; exit 1; }
-mode=${1:-menu}
-[[ $mode == (menu|western|--uninstall) ]] || { echo "usage: install.sh western [xbox|playstation] | menu | --uninstall"; exit 1; }
-style=${2:-playstation}
-[[ $style == (xbox|playstation) ]] || { echo "style: xbox or playstation"; exit 1; }
-grep -q DM_PAD_STYLE "$APP/Contents/Resources/dm/launcher.json" && packs=1 || packs=0
+mode=${1:-}
+[[ $mode == (menu|western|--uninstall) ]] || usage
+SRC=""; TMP=""; ORIG=""
+trap 'rm -f "$TMP" "$ORIG"; [[ -n $SRC ]] && rm -rf "$SRC"' EXIT
 
-# icons: keep each packed pack's files once (backup/icons_<style>; ABSENT lists the files a pack did not have)
-for st in $STYLES; do
-  ICONS="$APP/Contents/Resources/icons/$st"; BAK="$HERE/backup/icons_$st"
-  [[ -f "$BAK/.done" ]] && continue
-  (( packs )) || { echo "No backup of the $st pack: run this once on the prebuilt app (with the Buttons setting) first."; exit 1; }
-  mkdir -p "$BAK"; : > "$BAK/ABSENT"
-  for f in $FILES $RSIZE; do
-    if [[ -f "$BAK/$f" ]]; then continue
-    elif [[ -f "$ICONS/$f" ]]; then mkdir -p "$BAK/${f:h}"; cp "$ICONS/$f" "$BAK/$f"
-    else echo "$f" >> "$BAK/ABSENT"; fi
-  done
-  touch "$BAK/.done"
-done
+# icons: find the pack's romfs folder before touching anything
+if [[ $mode == western ]]; then
+  [[ -n ${2:-} && -e $2 ]] || usage
+  SRC=$(mktemp -d)
+  if [[ -f $2 ]]; then unzip -q "$2" -d "$SRC"; else cp -R "$2" "$SRC/pack"; fi
+  ROMFS=("$SRC"/**/romfs(/N))
+  (( ${#ROMFS} == 1 )) || { echo "Expected one romfs folder in $2, found ${#ROMFS}."; exit 1; }
+  ROMFS=$ROMFS[1]
+  [[ -f "$ROMFS/Font2/Scalable/External.Nin_Ounce_NVN2.bfotf.zs" ]] || { echo "$2 is not a button prompt pack for this game."; exit 1; }
+  [[ ${ROMFS:h:t} == *Western* ]] || echo "Note: ${ROMFS:h:t} is not a Western version; the icons will not match the buttons."
+fi
 
 # game module: back to the original first, then the chosen layout
 state=$(python3 "$HERE/build_mod.py" --check "$BIN")
 TMP=$(mktemp "${BIN:h}/.main.XXXXXX"); ORIG=$(mktemp "${BIN:h}/.orig.XXXXXX")
-trap 'rm -f "$TMP" "$ORIG"' EXIT
 case $state in
   original) cp "$BIN" "$ORIG" ;;
   menu|western|western-ab) python3 "$HERE/build_mod.py" --restore "$BIN" "$ORIG" ;;
   *) echo "main.patched.bin is not a file this mod knows ($state)."; exit 1 ;;
 esac
-layout=$mode; [[ $mode == western ]] && (( ! packs )) && layout=western-ab
-if [[ $mode == --uninstall ]]; then cp "$ORIG" "$TMP"; else python3 "$HERE/build_mod.py" --layout $layout "$ORIG" "$TMP"; fi
+case $mode in
+  western) python3 "$HERE/build_mod.py" --layout western-ab "$ORIG" "$TMP" ;;
+  menu) python3 "$HERE/build_mod.py" --layout menu "$ORIG" "$TMP" ;;
+  --uninstall) cp "$ORIG" "$TMP" ;;
+esac
 chmod 644 "$TMP"; mv -f "$TMP" "$BIN"
 
-# icons
-set_overlay() {   # env.txt: drop our DM_ROMFS_OVERLAY line, then add $1 if given
-  mkdir -p "$SUP"; touch "$SUP/env.txt"
-  grep -v -e '^DM_ROMFS_OVERLAY=.*/mods/oot-western-' -e '^# oot-menu-buttons' "$SUP/env.txt" > "$SUP/env.txt.new" || true
-  if [[ -n $1 ]]; then
-    grep -q '^DM_ROMFS_OVERLAY=' "$SUP/env.txt.new" && { rm "$SUP/env.txt.new"; echo "env.txt already sets another DM_ROMFS_OVERLAY"; exit 1; }
-    printf '# oot-menu-buttons: western button icons\nDM_ROMFS_OVERLAY=%s\n' "$1" >> "$SUP/env.txt.new"
-  fi
-  mv "$SUP/env.txt.new" "$SUP/env.txt"
-}
-if (( packs )); then
-  for st in $STYLES; do
-    ICONS="$APP/Contents/Resources/icons/$st"; BAK="$HERE/backup/icons_$st"
-    if [[ $mode == western ]]; then
-      OUT=$(mktemp -d); "$PY" "$HERE/icons_western.py" "$BAK" "$OUT" $st
-      for f in $FILES; do mkdir -p "$ICONS/${f:h}"; cp "$OUT/$f" "$ICONS/$f"; done; rm -rf "$OUT"
-    else
-      for f in $FILES; do
-        if grep -qxF "$f" "$BAK/ABSENT"; then rm -f "$ICONS/$f"; else cp "$BAK/$f" "$ICONS/$f"; fi
-      done
-    fi
-  done
-else
-  rm -rf "$SUP"/mods/oot-western-*(N)
-  if [[ $mode == western ]]; then
-    OVL="$SUP/mods/oot-western-$style"; mkdir -p "$OVL/${RSIZE:h}"
-    "$PY" "$HERE/icons_western.py" "$HERE/backup/icons_$style" "$OVL" $style
-    cp "$HERE/backup/icons_$style/$RSIZE" "$OVL/$RSIZE"   # the pack's size table (its font is larger than the game's)
-    set_overlay "$OVL"
-  else
-    set_overlay ""
-  fi
+# icon overlay: a RomFS overlay folder named in the game's env.txt (DM_ROMFS_OVERLAY)
+mkdir -p "$SUP"; touch "$SUP/env.txt"
+grep -v -e '^DM_ROMFS_OVERLAY=.*/mods/oot-western' -e '^# oot-' "$SUP/env.txt" > "$SUP/env.txt.new" || true
+rm -rf "$SUP"/mods/oot-western*(N)
+if [[ $mode == western ]]; then
+  grep -q '^DM_ROMFS_OVERLAY=' "$SUP/env.txt.new" && { rm "$SUP/env.txt.new"; echo "env.txt already sets another DM_ROMFS_OVERLAY; the icons are not installed."; exit 1; }
+  mkdir -p "${OVL:h}"; cp -R "$ROMFS" "$OVL"
+  printf '# oot-western-buttons: %s\nDM_ROMFS_OVERLAY=%s\n' "${ROMFS:h:t}" "$OVL" >> "$SUP/env.txt.new"
 fi
+mv "$SUP/env.txt.new" "$SUP/env.txt"
 
-# the bundle seals Resources: sign the outer app again, ad-hoc as packed, keeping its identifier and flags
+# the bundle seals Resources: sign the outer app again, ad-hoc as packed, keeping its identifier and flags. A custom
+# Finder icon (an Icon\r file in the bundle and its Finder info) is not allowed in a signed bundle: set it aside for that.
+ICON=$(printf '%s/Icon\r' "$APP"); KEEP=$(mktemp -d); FI=""
+[[ -e $ICON ]] && { ditto "$ICON" "$KEEP/Icon"; rm "$ICON"; }
+FI=$(xattr -px com.apple.FinderInfo "$APP" 2>/dev/null) && xattr -d com.apple.FinderInfo "$APP"
 codesign --force --sign - --preserve-metadata=identifier,entitlements,requirements,flags,runtime "$APP"
 codesign --verify --deep --strict "$APP" && echo "signature OK"
+[[ -e $KEEP/Icon ]] && ditto "$KEEP/Icon" "$ICON"; [[ -n $FI ]] && xattr -wx com.apple.FinderInfo "$FI" "$APP"; rm -rf "$KEEP"
 echo "module: $(python3 "$HERE/build_mod.py" --check "$BIN")"
-case $mode in
-  western) (( packs )) && echo "Set Buttons = Xbox or PlayStation in the game's launcher." || echo "Icons: $style (overlay in $OVL)." ;;
-  menu) (( packs )) && echo "Set Buttons = Switch in the game's launcher." ;;
-esac
+[[ $mode == western ]] && echo "icons: ${ROMFS:h:t} (overlay in $OVL)"
+exit 0
